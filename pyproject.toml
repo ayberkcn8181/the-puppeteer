@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "the-puppeteer"
+version = "0.1.0"
+description = "A purple native Linux desktop manager for Distrobox"
+requires-python = ">=3.10"
+dependencies = ["PySide6>=6.6,<7"]
+license = "MIT"
+
+[project.scripts]
+the-puppeteer = "puppeteer.app:main"
+the-puppeteer-uninstall = "puppeteer.uninstall:main"
+
+[tool.setuptools]
+packages = ["puppeteer", "puppeteer.qml"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+puppeteer = ["qml/*.qml", "qml/*.svg"]
