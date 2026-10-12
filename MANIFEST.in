@@ -1,3 +1,4 @@
 include run.sh setup.sh uninstall.sh requirements.txt
 recursive-include packaging *.py
+recursive-include packaging *.sh
 recursive-include puppeteer/qml *.qml *.svg

@@ -31,6 +31,7 @@ SOURCE_FILES = (
     "README.md", "LICENSE", "MANIFEST.in", "pyproject.toml", "requirements.txt",
     "run.sh", "setup.sh", "uninstall.sh", ".gitignore",
     "packaging/install-launcher.py", "tests/test_core.py", "tests/test_qt.py", "tests/test_uninstall.py",
+    "packaging/python-runtime.sh", "tests/test_runtime.py", "puppeteer/runtime.py",
     "puppeteer/__init__.py", "puppeteer/__main__.py", "puppeteer/app.py",
     "puppeteer/backend.py", "puppeteer/core.py", "puppeteer/worker.py", "puppeteer/uninstall.py",
     "puppeteer/qml/__init__.py", "puppeteer/qml/Main.qml", "puppeteer/qml/logo.svg",

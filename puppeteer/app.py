@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+from .runtime import load_qt, report_qt_error
 
 
 def main() -> int:
@@ -15,38 +16,35 @@ def main() -> int:
         print("The Puppeteer kullanıcı hesabıyla çalıştırılmalı; sudo ile başlatma.", file=sys.stderr)
         return 2
     try:
-        from PySide6.QtCore import QTimer, QUrl, QLockFile
-        from PySide6.QtGui import QGuiApplication, QIcon
-        from PySide6.QtQml import QQmlApplicationEngine
-        from PySide6.QtQuickControls2 import QQuickStyle
-        from .backend import Backend
-        from .core import config_home
-    except ImportError:
-        print("PySide6 eksik. README'deki kurulum adımlarını uygula.", file=sys.stderr)
+        qt = load_qt()
+    except (ImportError, OSError) as error:
+        report_qt_error(error)
         return 2
-    app = QGuiApplication([sys.argv[0]])
+    from .backend import Backend
+    from .core import config_home
+    app = qt.QGuiApplication([sys.argv[0]])
     app.setApplicationName("The Puppeteer")
     app.setOrganizationName("ThePuppeteer")
     app.setApplicationVersion("0.1.0")
     app.setDesktopFileName("the-puppeteer")
     assets = Path(__file__).parent / "qml"
-    app.setWindowIcon(QIcon(str(assets / "logo.svg")))
+    app.setWindowIcon(qt.QIcon(str(assets / "logo.svg")))
     lock = None
     if not args.demo:
         config_home().mkdir(parents=True, exist_ok=True)
-        lock = QLockFile(str(config_home() / "application.lock"))
+        lock = qt.QLockFile(str(config_home() / "application.lock"))
         if not lock.tryLock(100):
             print("The Puppeteer zaten açık.", file=sys.stderr)
             return 1
-    QQuickStyle.setStyle("Basic")
+    qt.QQuickStyle.setStyle("Basic")
     backend = Backend(demo=args.demo)
-    engine = QQmlApplicationEngine()
+    engine = qt.QQmlApplicationEngine()
     backend.setParent(engine)
     engine.rootContext().setContextProperty("backend", backend)
-    engine.load(QUrl.fromLocalFile(str(assets / "Main.qml")))
+    engine.load(qt.QUrl.fromLocalFile(str(assets / "Main.qml")))
     if not engine.rootObjects():
         return 1
-    QTimer.singleShot(0, backend.refresh)
+    qt.QTimer.singleShot(0, backend.refresh)
     if args.smoke_test:
-        QTimer.singleShot(1000, app.quit)
+        qt.QTimer.singleShot(1000, app.quit)
     return app.exec()

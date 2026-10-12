@@ -14,7 +14,9 @@ chmod +x setup.sh run.sh
 ./run.sh
 ```
 
-`setup.sh`, sistemde PySide6 varsa onu kullanır; yoksa yalnızca bu klasörde `.venv` oluşturup PySide6'yı kurar. Distrobox veya Podman'ı bu betik kurmaz. Uygulamadaki **Kurulum** ekranı eksik bileşenler için paket işlemini gösterir ve terminalde başlatır.
+`setup.sh` ve `run.sh`, önce bu klasördeki `.venv` ortamını, ardından PATH üzerindeki `python3` ve `/usr/bin/python3` kurulumlarını denetler. Uygulamanın ihtiyaç duyduğu Qt modüllerini yükleyebilen ilk Python kullanılır; eksik bir `.venv`, çalışan sistem kurulumunu engellemez. Uygun ortam yoksa `setup.sh` yalnızca bu klasörde `.venv` oluşturup PySide6'yı kurar. Distrobox veya Podman'ı bu betik kurmaz. Uygulamadaki **Kurulum** ekranı eksik bileşenler için paket işlemini gösterir ve terminalde başlatır.
+
+Başlatma başarısızsa hata çıktısında denenen Python yolu ve eksik Qt modülü/paylaşımlı kütüphane gösterilir. Yalnızca `import PySide6` kontrolünün başarılı olması tüm Qt bileşenlerinin çalıştığı anlamına gelmez.
 
 Python 3.10+ gerekir. PySide6 6.10.2 ile test edildi. Pip sürümünün Qt paketlerini indirebilmesi için internet gerekir. Debian/Ubuntu'da venv yoksa `python3-venv` paketini kur. Çok eski glibc sistemlerinde dağıtımın kendi PySide6 paketini kullan veya desteklenen bir PySide6 sürümü seç.
 
