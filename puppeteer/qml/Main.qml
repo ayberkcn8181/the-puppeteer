@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 
 ApplicationWindow {
     id: win
@@ -49,10 +50,12 @@ ApplicationWindow {
     function openCreate(index) {
         createError.text = ""
         distroChoice.currentIndex = index || 0
+        versionChoice.currentIndex = 0
         imageField.text = backend.catalog[distroChoice.currentIndex].image
         nameField.text = backend.catalog[distroChoice.currentIndex].id + "-work"
         ownHome.checked = true
-        devTools.checked = false
+        templateChoice.currentIndex = 0
+        extraPackages.text = ""
         nvidia.checked = false
         createDialog.open()
     }
@@ -136,7 +139,7 @@ ApplicationWindow {
             Label { text: "The Puppeteer"; color: ink; font.pixelSize: 18; font.weight: Font.Medium }
             Label { text: tr("Distrobox yöneticisi", "Distrobox manager"); color: secondary; visible: win.width > 950; font.pixelSize: 12 }
             Item { Layout.fillWidth: true }
-            Label { text: backend.demo ? "DEMO" : "v0.1.0"; color: accent; font.pixelSize: 12 }
+            Label { text: backend.demo ? "DEMO" : "v0.2.0"; color: accent; font.pixelSize: 12 }
             Choice {
                 objectName: "themeChoice"
                 model: [tr("Sistem teması", "System theme"), tr("Koyu mor", "Dark purple"), tr("Açık lavanta", "Light lavender")]
@@ -168,7 +171,7 @@ ApplicationWindow {
                 anchors.margins: 12
                 spacing: 7
                 Repeater {
-                    model: [tr("Ortamlar", "Environments"), tr("Dağıtımlar", "Distributions"), tr("Uygulamalar", "Applications"), tr("İşlemler", "Activity"), tr("Kurulum", "Setup")]
+                    model: [tr("Ortamlar", "Environments"), tr("Dağıtımlar", "Distributions"), tr("Uygulamalar", "Applications"), tr("İşlemler", "Activity"), tr("Kurulum", "Setup"), tr("Ortam tarifleri", "Definitions"), tr("Tanılama", "Diagnostics")]
                     delegate: Button {
                         required property int index
                         required property string modelData
@@ -266,6 +269,7 @@ ApplicationWindow {
                                         ActionButton { objectName: "openTerminal"; text: tr("Terminal aç", "Open terminal"); primary: true; enabled: win.canOperate; onClicked: backend.openTerminal() }
                                         ActionButton { text: tr("Güncelle", "Update"); enabled: win.canOperate; onClicked: backend.containerAction("upgrade", "") }
                                         ActionButton { text: backend.selected.running ? tr("Durdur", "Stop") : tr("Başlat", "Start"); enabled: win.canOperate; onClicked: backend.containerAction(backend.selected.running ? "stop" : "start", "") }
+                                        ActionButton { objectName: "exportDefinition"; text: tr("Tarifi dışa aktar", "Export definition"); enabled: win.hasSelection && !backend.busy && !backend.refreshing; onClicked: { if (backend.exportDefinition()) win.page = 5 } }
                                     }
                                     Rectangle { Layout.fillWidth: true; height: 1; color: line }
                                     Pair { label: tr("İmaj", "Image"); value: backend.selected.image || "" }
@@ -308,7 +312,8 @@ ApplicationWindow {
                     anchors.margins: 24
                     spacing: 18
                     Heading { text: tr("Dağıtımlar", "Distributions") }
-                    Hint { text: tr("Bir imaj seç. Sürüm veya imaj adresini oluşturma penceresinde değiştirebilirsin.", "Choose an image. You can change its version or address when creating it.") }
+                    Hint { text: tr("Dağıtımı seç; sürümü ve geliştirme şablonunu oluşturma penceresinde belirle.", "Choose a distribution, then select a version and development template.") }
+                    Hint { text: tr("Yerel mimari: ", "Native platform: ") + (backend.nativePlatform || tr("Otomatik", "Automatic")) + tr(" · Etiketler registry'de canlı doğrulanmaz.", " · Tags are not verified live in the registry.") }
                     ScrollView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
@@ -338,7 +343,7 @@ ApplicationWindow {
                             }
                         }
                     }
-                    Hint { text: tr("Konteynerler ana sistemin Linux çekirdeğini kullanır.", "Containers use the host Linux kernel.") }
+                    Hint { text: tr("Özel imaj adresleri desteklenir. Farklı mimari emülasyonu bu sürümde yapılandırılmaz.", "Custom image addresses are supported. Cross-architecture emulation is not configured.") }
                 }
             }
 
@@ -492,13 +497,155 @@ ApplicationWindow {
                             ActionButton { objectName: "installButton"; text: tr("Terminalde kur", "Install in terminal"); primary: true; enabled: !backend.busy && !backend.refreshing && !backend.host.immutable && backend.host.family !== "unknown" && (!backend.host.distrobox || (!backend.host.motor && backend.runtime === "podman")); onClicked: installDialog.open() }
                             ActionButton { text: tr("Yeniden denetle", "Check again"); enabled: !backend.busy && !backend.refreshing; onClicked: backend.refresh() }
                             ActionButton { text: tr("Resmi yönerge", "Official guide"); onClicked: backend.openDocumentation() }
+                            ActionButton { text: tr("Tanılama", "Diagnostics"); onClicked: win.page = 6 }
                         }
                         Hint { text: tr("Yeni kurulum için Podman rootless önerilir. Docker seçeneği mevcut servis erişimini kullanır; grupları veya servisleri otomatik değiştirmez.", "Podman rootless is recommended. Docker uses existing daemon access; groups and services are not changed automatically.") }
                         Hint { text: tr("Distrobox ana sistemle entegredir; güvenlik sandbox'ı değildir.", "Distrobox integrates with the host; it is not a security sandbox.") }
                     }
                 }
             }
+            Item {
+                ScrollView {
+                    id: definitionsScroll
+                    anchors.fill: parent
+                    anchors.margins: 24
+                    contentWidth: availableWidth
+                    ColumnLayout {
+                        width: definitionsScroll.availableWidth
+                        spacing: 14
+                        Heading { text: tr("Ortam tarifleri", "Environment definitions") }
+                        Hint { text: tr("INI dosyasını aç veya metni yapıştır; incele, sonra seçili ortamı oluştur. Dosyadaki diğer ortamlar çalıştırılmaz.", "Open an INI file or paste its text, review it, then create the selected environment. Other entries are not executed.") }
+                        Flow {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: childrenRect.height
+                            spacing: 8
+                            ActionButton { objectName: "openManifestFile"; text: tr("Dosya aç", "Open file"); onClicked: openManifestDialog.open() }
+                            ActionButton { text: tr("Seçili ortamın tarifi", "Selected environment definition"); enabled: win.hasSelection && !backend.busy; onClicked: backend.exportDefinition() }
+                            ActionButton { objectName: "copyManifest"; text: tr("Kopyala", "Copy"); enabled: manifestEditor.text.length > 0; onClicked: backend.copyText(manifestEditor.text) }
+                            ActionButton { objectName: "saveManifest"; text: tr("Farklı kaydet", "Save as"); enabled: !backend.demo && backend.manifestEntries.length > 0; onClicked: saveManifestDialog.open() }
+                        }
+                        ScrollView {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 205
+                            TextArea {
+                                id: manifestEditor
+                                objectName: "manifestEditor"
+                                property bool syncing: false
+                                text: ""
+                                placeholderText: "[python-work]\nimage=\"docker.io/library/ubuntu:24.04\"\nadditional_packages=\"git python3 python3-venv\"\nstart_now=true"
+                                color: ink
+                                font.family: "monospace"
+                                font.pixelSize: 12
+                                selectByMouse: true
+                                wrapMode: TextEdit.Wrap
+                                textFormat: TextEdit.PlainText
+                                background: Rectangle { color: surface; radius: 7; border.color: line }
+                                onTextChanged: if (!syncing) backend.editManifest(text)
+                            }
+                        }
+                        Connections {
+                            target: backend
+                            function onManifestChanged() {
+                                if (manifestEditor.text !== backend.manifestText) {
+                                    manifestEditor.syncing = true
+                                    manifestEditor.text = backend.manifestText
+                                    manifestEditor.syncing = false
+                                }
+                            }
+                        }
+                        ActionButton { objectName: "reviewManifest"; text: tr("Tanımı incele", "Review definition"); primary: true; onClicked: backend.reviewManifest(manifestEditor.text) }
+                        Hint { text: backend.manifestError; visible: text !== ""; color: danger; textFormat: Text.PlainText }
+                        Choice {
+                            id: manifestChoice
+                            objectName: "manifestChoice"
+                            Layout.fillWidth: true
+                            visible: backend.manifestEntries.length > 0
+                            model: backend.manifestEntries.map(function(e) { return e.name + " · " + e.image })
+                            Accessible.name: tr("İçe aktarılacak ortam", "Environment to import")
+                        }
+                        TextArea {
+                            objectName: "manifestPreview"
+                            visible: backend.manifestEntries.length > 0
+                            Layout.fillWidth: true
+                            text: { backend.manifestEntries; backend.containers; backend.runtime; return backend.manifestPreview(manifestChoice.currentIndex) }
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextEdit.Wrap
+                            textFormat: TextEdit.PlainText
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            color: secondary
+                            background: Rectangle { color: surface; radius: 7 }
+                        }
+                        ActionButton {
+                            objectName: "importEnvironment"
+                            visible: backend.manifestEntries.length > 0
+                            text: tr("Seçili ortamı oluştur", "Create selected environment")
+                            primary: true
+                            enabled: { backend.manifestEntries; backend.containers; return backend.host.ready && !backend.busy && !backend.refreshing && backend.canImport(manifestChoice.currentIndex) }
+                            onClicked: { if (backend.importEnvironment(manifestChoice.currentIndex)) win.page = 3 }
+                        }
+                        Hint { text: tr("Seçili motor kullanılır. Tarif; kişisel dosyaları ve sonradan yapılan değişiklikleri yedeklemez. Hook, root=true, replace=true ve gelişmiş seçenekler desteklenmez.", "Uses the selected engine. Definitions do not back up personal files or later changes. Hooks, root=true, replace=true and advanced options are unsupported.") }
+                    }
+                }
+            }
+
+            Item {
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 24
+                    spacing: 14
+                    Heading { text: tr("Tanılama", "Diagnostics") }
+                    Hint { text: tr("Distrobox, motor ve terminal erişimini kontrol et. Sistem ayarları otomatik değiştirilmez.", "Check Distrobox, engine and terminal access. System settings are not changed automatically.") }
+                    RowLayout {
+                        ActionButton { text: tr("Yeniden denetle", "Check again"); primary: true; enabled: !backend.busy && !backend.refreshing; onClicked: backend.refresh() }
+                        ActionButton { objectName: "copyDiagnostics"; text: tr("Raporu kopyala", "Copy report"); onClicked: backend.copyText(backend.diagnosticReport()) }
+                        ActionButton { text: tr("Kuruluma git", "Go to Setup"); onClicked: win.page = 4 }
+                    }
+                    Hint { text: tr("Denetleniyor…", "Checking…"); visible: backend.refreshing }
+                    ListView {
+                        objectName: "diagnosticList"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        model: backend.diagnostics
+                        clip: true
+                        spacing: 10
+                        ScrollBar.vertical: ScrollBar {}
+                        delegate: Panel {
+                            required property var modelData
+                            width: ListView.view.width
+                            height: checkContent.implicitHeight + 30
+                            ColumnLayout {
+                                id: checkContent
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.margins: 15
+                                spacing: 8
+                                Label { text: (modelData.status === "ok" ? "✓ " : modelData.status === "error" ? "! " : "• ") + modelData.title; color: modelData.status === "error" ? danger : accent; font.weight: Font.Medium; textFormat: Text.PlainText }
+                                Hint { text: modelData.detail; textFormat: Text.PlainText }
+                            }
+                        }
+                    }
+                    Hint { text: tr("Raporu paylaşmadan önce hata çıktısındaki kişisel yolları incele.", "Review personal paths in error output before sharing the report.") }
+                }
+            }
         }
+    }
+
+    FileDialog {
+        id: openManifestDialog
+        title: win.tr("Ortam tanımını aç", "Open environment definition")
+        nameFilters: ["Distrobox definitions (*.ini)", "All files (*)"]
+        onAccepted: backend.loadManifestFile(selectedFile.toString())
+    }
+    FileDialog {
+        id: saveManifestDialog
+        title: win.tr("Ortam tanımını kaydet", "Save environment definition")
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "ini"
+        nameFilters: ["Distrobox definitions (*.ini)"]
+        onAccepted: backend.saveManifestFile(selectedFile.toString(), manifestEditor.text)
     }
 
     footer: Rectangle {
@@ -515,7 +662,7 @@ ApplicationWindow {
                 Label { text: backend.busy ? (backend.jobs[0] ? backend.jobs[0].stage : tr("İşlem sürüyor…", "Working…")) : backend.refreshing ? tr("Denetleniyor…", "Checking…") : backend.demo ? tr("Demo · sistem komutları çalıştırılmaz", "Demo · system commands are disabled") : backend.runtime; color: secondary; Layout.fillWidth: true; elide: Text.ElideRight; font.pixelSize: 12; textFormat: Text.PlainText }
                 ActionButton { visible: backend.busy; text: tr("İşlemi göster", "View activity"); implicitHeight: 29; onClicked: win.page = 3 }
                 ActionButton { visible: backend.busy; text: tr("İptal", "Cancel job"); destructive: true; implicitHeight: 29; onClicked: backend.cancelJob() }
-                Label { text: "The Puppeteer · 0.1.0"; color: secondary; font.pixelSize: 11 }
+                Label { text: "The Puppeteer · 0.2.0"; color: secondary; font.pixelSize: 11 }
             }
             Label { objectName: "statusMessage"; text: backend.message; visible: text !== ""; color: backend.messageError ? danger : accent; Layout.fillWidth: true; maximumLineCount: 2; wrapMode: Text.Wrap; elide: Text.ElideRight; textFormat: Text.PlainText; font.pixelSize: 12; Accessible.name: text }
         }
@@ -544,7 +691,14 @@ ApplicationWindow {
                 ColumnLayout {
                     Layout.fillWidth: true
                     Label { text: tr("Dağıtım", "Distribution"); color: secondary }
-                    Choice { id: distroChoice; Layout.fillWidth: true; model: backend.catalog.map(function(d) { return d.name + " · " + d.version }); onActivated: imageField.text = backend.catalog[currentIndex].image; Accessible.name: tr("Dağıtım", "Distribution") }
+                    Choice {
+                        id: distroChoice
+                        objectName: "distroChoice"
+                        Layout.fillWidth: true
+                        model: backend.catalog.map(function(d) { return d.name })
+                        onActivated: { versionChoice.currentIndex = 0; imageField.text = backend.catalog[currentIndex].versions[0].image }
+                        Accessible.name: tr("Dağıtım", "Distribution")
+                    }
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
@@ -552,25 +706,55 @@ ApplicationWindow {
                     Field { id: nameField; objectName: "createName"; Layout.fillWidth: true; maximumLength: 63; Accessible.name: tr("Ortam adı", "Environment name") }
                 }
             }
+            RowLayout {
+                Layout.fillWidth: true
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Label { text: tr("Sürüm", "Version"); color: secondary }
+                    Choice { id: versionChoice; objectName: "versionChoice"; Layout.fillWidth: true; model: backend.catalog[distroChoice.currentIndex].versions.map(function(v) { return v.label }); onActivated: imageField.text = backend.catalog[distroChoice.currentIndex].versions[currentIndex].image; Accessible.name: tr("İmaj sürümü", "Image version") }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Label { text: tr("Geliştirme şablonu", "Development template"); color: secondary }
+                    Choice { id: templateChoice; objectName: "templateChoice"; Layout.fillWidth: true; model: backend.templates.map(function(t) { return backend.language === "en" ? t.en : t.tr }); Accessible.name: tr("Geliştirme şablonu", "Development template") }
+                }
+            }
             Label { text: tr("İmaj ve sürüm", "Image and version"); color: secondary }
-            Field { id: imageField; Layout.fillWidth: true; Accessible.name: tr("İmaj adresi", "Image address") }
+            Field { id: imageField; objectName: "imageField"; Layout.fillWidth: true; Accessible.name: tr("İmaj adresi", "Image address") }
+            Hint { text: tr("Mimari: ", "Platform: ") + (backend.nativePlatform || tr("Otomatik", "Automatic")); font.pixelSize: 12 }
             CheckBox { id: ownHome; text: tr("Ortama özel ev dizini", "Separate home directory"); checked: true }
             Hint { text: ownHome.checked ? backend.homePreview(nameField.text) : tr("Ana sistem ev dizini kullanılacak.", "The host home directory will be used."); font.pixelSize: 12; textFormat: Text.PlainText }
             Hint { text: tr("Ayrı ev dizini ana sistem dosyalarına erişimi engellemez.", "A separate home does not restrict access to host files."); font.pixelSize: 12 }
-            CheckBox { id: devTools; text: tr("Git ve CMake araçlarını ekle", "Include Git and CMake") }
+            Label { text: tr("Ek paketler (boşlukla ayır)", "Additional packages (space separated)"); color: secondary }
+            Field { id: extraPackages; objectName: "extraPackages"; Layout.fillWidth: true; placeholderText: "git cmake"; Accessible.name: tr("Ek paketler", "Additional packages") }
+            Hint { text: tr("Kurulacak paketler: ", "Packages to install: ") + backend.packagePreview(backend.templates[templateChoice.currentIndex].id, imageField.text, extraPackages.text); textFormat: Text.PlainText; font.pixelSize: 12 }
             CheckBox { id: nvidia; text: tr("NVIDIA sürücü entegrasyonu (uyumlu ana sistemde)", "NVIDIA driver integration (compatible hosts)") }
             ScrollView {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 93
-                TextArea { text: backend.createPreview(nameField.text, imageField.text, ownHome.checked, devTools.checked, nvidia.checked); readOnly: true; wrapMode: TextEdit.Wrap; font.family: "monospace"; font.pixelSize: 12; color: secondary; textFormat: TextEdit.PlainText; background: Rectangle { color: base; radius: 6 } }
+                TextArea {
+                    objectName: "profilePreview"
+                    text: { backend.containers; return backend.profilePreview(nameField.text, imageField.text, ownHome.checked, backend.templates[templateChoice.currentIndex].id, extraPackages.text, nvidia.checked) }
+                    readOnly: true
+                    wrapMode: TextEdit.Wrap
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    color: secondary
+                    textFormat: TextEdit.PlainText
+                    background: Rectangle { color: base; radius: 6 }
+                }
             }
             Label { id: createError; color: danger; visible: text !== ""; Layout.fillWidth: true; wrapMode: Text.Wrap; textFormat: Text.PlainText }
+            }
+        }
+        footer: Item {
+            implicitHeight: 56
             RowLayout {
-                Layout.fillWidth: true
+                anchors.fill: parent
+                anchors.margins: 12
                 Item { Layout.fillWidth: true }
                 ActionButton { text: tr("Vazgeç", "Cancel"); onClicked: createDialog.close() }
-                ActionButton { objectName: "confirmCreate"; text: tr("Oluştur ve hazırla", "Create and prepare"); primary: true; enabled: !backend.busy && !backend.refreshing; onClicked: { if (backend.createContainer(nameField.text, imageField.text, ownHome.checked, devTools.checked, nvidia.checked)) createDialog.close(); else createError.text = backend.message } }
-            }
+                ActionButton { objectName: "confirmCreate"; text: tr("Oluştur ve hazırla", "Create and prepare"); primary: true; enabled: !backend.busy && !backend.refreshing; onClicked: { if (backend.createProfile(nameField.text, imageField.text, ownHome.checked, backend.templates[templateChoice.currentIndex].id, extraPackages.text, nvidia.checked)) createDialog.close(); else createError.text = backend.message } }
             }
         }
     }

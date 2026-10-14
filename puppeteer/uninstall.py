@@ -30,10 +30,12 @@ class RemovalPlan:
 SOURCE_FILES = (
     "README.md", "LICENSE", "MANIFEST.in", "pyproject.toml", "requirements.txt",
     "run.sh", "setup.sh", "uninstall.sh", ".gitignore",
-    "packaging/install-launcher.py", "tests/test_core.py", "tests/test_qt.py", "tests/test_uninstall.py",
+    "packaging/install-launcher.py", "tests/test_core.py", "tests/test_qt.py", "tests/test_uninstall.py", "tests/test_features.py", "tests/test_live.py",
     "puppeteer/__init__.py", "puppeteer/__main__.py", "puppeteer/app.py",
     "puppeteer/backend.py", "puppeteer/core.py", "puppeteer/worker.py", "puppeteer/uninstall.py",
+    "puppeteer/catalog.py", "puppeteer/diagnostics.py", "puppeteer/manifests.py",
     "puppeteer/qml/__init__.py", "puppeteer/qml/Main.qml", "puppeteer/qml/logo.svg",
+    "CHANGELOG.md", "examples/python-work.ini", ".github/workflows/test.yml",
 )
 
 
@@ -217,7 +219,7 @@ def build_plan(source: Path | None, config: Path, data: Path, info: dict, python
                     continue
                 plan.paths.append(path)
                 plan.parents.append(path.parent)
-        plan.parents += [guarded_child(source, rel) for rel in ("puppeteer/qml", "puppeteer", "tests", "packaging", "dist", "build/lib", "build", "the_puppeteer.egg-info")]
+        plan.parents += [guarded_child(source, rel) for rel in ("puppeteer/qml", "puppeteer", "tests", "packaging", "examples", ".github/workflows", ".github", "dist", "build/lib", "build", "the_puppeteer.egg-info")]
         plan.parents.append(source)
     if purge:
         # Deliberately avoid data/the-puppeteer itself: it contains homes.

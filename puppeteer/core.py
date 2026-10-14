@@ -13,6 +13,7 @@ import shlex
 import shutil
 from dataclasses import dataclass, field, asdict
 from typing import Callable
+from .catalog import CATALOG, native_platform
 
 
 class ValidationError(ValueError):
@@ -41,17 +42,22 @@ class Plan:
         return "\n".join(shlex.join(step.argv) for step in self.steps)
 
 
-CATALOG = [
-    {"id": "ubuntu", "name": "Ubuntu", "version": "24.04 LTS", "image": "docker.io/library/ubuntu:24.04", "manager": "APT", "mark": "U"},
-    {"id": "fedora", "name": "Fedora", "version": "Stable / latest", "image": "registry.fedoraproject.org/fedora:latest", "manager": "DNF", "mark": "F"},
-    {"id": "arch", "name": "Arch Linux", "version": "Rolling", "image": "docker.io/library/archlinux:latest", "manager": "Pacman", "mark": "A"},
-    {"id": "debian", "name": "Debian", "version": "Stable", "image": "docker.io/library/debian:stable", "manager": "APT", "mark": "D"},
-    {"id": "opensuse", "name": "openSUSE", "version": "Tumbleweed", "image": "registry.opensuse.org/opensuse/tumbleweed:latest", "manager": "Zypper", "mark": "S"},
-]
-
 NAME_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}\Z")
 IMAGE_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_./:@-]{0,511}\Z")
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+PACKAGE_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9+_.-]{0,127}\Z")
+
+
+def validate_packages(packages: list[str]) -> list[str]:
+    if not isinstance(packages, list) or len(packages) > 80 or any(not isinstance(p, str) or not PACKAGE_PATTERN.fullmatch(p) for p in packages):
+        raise ValidationError("En fazla 80 geçerli paket adı belirt; komut, seçenek veya URL kullanma.")
+    return list(dict.fromkeys(packages))
+
+
+def validate_home(home: str) -> str:
+    if not isinstance(home, str) or len(home) > 4096 or not Path(home).is_absolute() or home == "/" or any(ord(c) < 32 for c in home) or any(c in home for c in "$`\"'\\;|&<>(){}!*?[]#"):
+        raise ValidationError("Ev dizini mutlak bir yol olmalı; kontrol karakterleri ve shell ifadeleri içeremez.")
+    return str(Path(home))
 
 
 def validate_name(name: str) -> str:
@@ -171,20 +177,30 @@ class Commands:
             argv.append("--no-tty")
         return argv + (["--", *command] if command else [])
 
-    def create(self, name: str, image: str, own_home: bool, developer: bool = False, nvidia: bool = False, existing: list[str] = ()) -> Plan:
+    def create(self, name: str, image: str, own_home: bool, developer: bool = False, nvidia: bool = False, existing: list[str] = (), *, packages: list[str] | None = None, home: str = "", platform: str = "", pull: bool = False, start_now: bool = True) -> Plan:
         validate_name(name)
         validate_image(image)
         if name in existing:
             raise ValidationError("Bu ortam adı zaten kullanılıyor.")
         argv = [self.binary, "create", "--name", name, "--image", image, "--yes"]
-        home = default_home(name) if own_home else str(Path.home())
-        if own_home:
+        home = validate_home(home or (default_home(name) if own_home else str(Path.home())))
+        if own_home or home != str(Path.home()):
             argv += ["--home", home]
-        if developer:
-            argv += ["--additional-packages", "git cmake"]
+        package_list = validate_packages([*(["git", "cmake"] if developer else []), *(packages or [])])
+        if package_list:
+            argv += ["--additional-packages", " ".join(package_list)]
+        if platform:
+            if platform != native_platform():
+                raise ValidationError("Bu sürüm yalnızca ana sistemin yerel mimarisini destekler; emülasyon yapılandırılmaz.")
+            argv += ["--platform", platform]
+        if pull:
+            argv.append("--pull")
         if nvidia:
             argv.append("--nvidia")
-        return Plan(f"Oluşturma · {name}", [Step("İmaj ve konteyner oluşturuluyor", argv), Step("İlk açılış hazırlanıyor", self.enter(name, ["true"]))], self.runtime, name, True, {"home": home, "name": name, "image": image})
+        steps = [Step("İmaj ve konteyner oluşturuluyor", argv), Step("İlk açılış hazırlanıyor", self.enter(name, ["true"]))]
+        if not start_now:
+            steps.append(Step("Hazırlanan ortam durduruluyor", [self.binary, "stop", "--yes", name]))
+        return Plan(f"Oluşturma · {name}", steps, self.runtime, name, True, {"home": home, "name": name, "image": image, "packages": package_list, "nvidia": nvidia, "platform": platform, "pull": pull, "start_now": start_now})
 
     def clone(self, source: str, name: str, own_home: bool, existing: list[str]) -> Plan:
         validate_name(source)

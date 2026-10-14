@@ -9,6 +9,7 @@ import signal
 import sys
 import time
 import uuid
+import tempfile
 
 from PySide6.QtCore import QObject, Property, QProcess, QProcessEnvironment, QTimer, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication
@@ -18,6 +19,9 @@ from .core import (CATALOG, DISCOVER_APPS, Commands, Plan, Step, ValidationError
                    atomic_json, config_home, data_home, default_home, exported_desktops,
                    host_profile, installation_plan, load_settings, parse_apps, parse_list,
                    terminal_command, validate_name)
+from .catalog import TEMPLATES, native_platform, template_packages
+from .diagnostics import diagnostic_checks
+from .manifests import MAX_MANIFEST_BYTES, parse_manifest, serialize_manifest
 
 
 class Backend(QObject):
@@ -27,6 +31,7 @@ class Backend(QObject):
     settingsChanged = Signal()
     jobsChanged = Signal()
     messageChanged = Signal()
+    manifestChanged = Signal()
 
     def __init__(self, demo: bool = False, parent=None):
         super().__init__(parent)
@@ -48,6 +53,10 @@ class Backend(QObject):
         self._error = False
         self._cancel_requested = False
         self._homes = {}
+        self._definitions = {}
+        self._manifest_text = ""
+        self._manifest_entries = []
+        self._manifest_error = ""
         self._demo_initialized = False
         self._demo_exports = set()
         if not demo:
@@ -55,6 +64,14 @@ class Backend(QObject):
                 self._homes = json.loads((config_home() / "environments.json").read_text())
                 if not isinstance(self._homes, dict):
                     self._homes = {}
+            except (OSError, ValueError):
+                pass
+            try:
+                path = config_home() / "definitions.json"
+                if path.stat().st_size <= 1024 * 1024:
+                    definitions = json.loads(path.read_text())
+                    if isinstance(definitions, dict):
+                        self._definitions = {k: v for k, v in definitions.items() if isinstance(v, dict)}
             except (OSError, ValueError):
                 pass
             self._load_history()
@@ -75,6 +92,30 @@ class Backend(QObject):
     @Property("QVariantList", constant=True)
     def catalog(self):
         return CATALOG
+
+    @Property("QVariantList", constant=True)
+    def templates(self):
+        return TEMPLATES
+
+    @Property(str, constant=True)
+    def nativePlatform(self):
+        return native_platform()
+
+    @Property("QVariantList", notify=stateChanged)
+    def diagnostics(self):
+        return diagnostic_checks(self._host, self.runtime, self.terminal, self.language, demo=self.demo)
+
+    @Property(str, notify=manifestChanged)
+    def manifestText(self):
+        return self._manifest_text
+
+    @Property(str, notify=manifestChanged)
+    def manifestError(self):
+        return self._manifest_error
+
+    @Property("QVariantList", notify=manifestChanged)
+    def manifestEntries(self):
+        return self._manifest_entries
 
     @Property("QVariantList", notify=inventoryChanged)
     def containers(self):
@@ -197,6 +238,7 @@ class Backend(QObject):
         except OSError as error:
             self._say(str(error), True)
         self.settingsChanged.emit()
+        self.stateChanged.emit()
         if key == "runtime":
             self._generation += 1
             self._refreshing = False
@@ -290,7 +332,7 @@ class Backend(QObject):
                     {"name": "arch-tools", "id": "demo2", "image": CATALOG[2]["image"], "distro": "Arch Linux", "status": "Exited", "running": False, "home": default_home("arch-tools"), "runtime": "podman"},
                 ]
                 self._demo_initialized = True
-            self._host = {"name": "CachyOS · Demo", "family": "arch", "distrobox": True, "motor": True, "ready": True, "rootless": True, "engineError": "", "version": "Demo", "display": True, "immutable": False}
+            self._host = {"name": "CachyOS · Demo", "family": "arch", "distrobox": True, "motor": True, "ready": True, "engineReady": True, "rootless": True, "engineError": "", "version": "Demo", "display": True, "immutable": False}
             if not self._selected:
                 self._selected = self._containers[0]["name"]
             self.inventoryChanged.emit()
@@ -300,7 +342,7 @@ class Backend(QObject):
         generation = self._generation
         runtime = self.runtime
         self._refreshing = True
-        self._host = {**host_profile(), "distrobox": bool(shutil.which("distrobox")), "motor": bool(shutil.which(runtime)), "ready": False, "rootless": False, "display": bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")), "engineError": "", "version": ""}
+        self._host = {**host_profile(), "distrobox": bool(shutil.which("distrobox")), "motor": bool(shutil.which(runtime)), "ready": False, "engineReady": False, "rootless": False, "display": bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")), "engineError": "", "inventoryError": "", "version": ""}
         self.stateChanged.emit()
 
         def done():
@@ -339,6 +381,7 @@ class Backend(QObject):
                 done()
                 return
             self._host["ready"] = True
+            self._host["engineReady"] = True
             self._capture(["distrobox", "list", "--no-color"], list_done)
 
         def list_done(code, output, error):
@@ -346,6 +389,10 @@ class Backend(QObject):
                 return
             if code:
                 self._host["ready"] = False
+                self._host["inventoryError"] = error.strip() or output.strip() or "Ortamlar okunamadı."
+                self._containers, self._apps = [], []
+                self.inventoryChanged.emit()
+                self.appsChanged.emit()
                 self._say(error.strip() or output.strip() or "Ortamlar okunamadı.", True)
                 done()
                 return
@@ -353,6 +400,10 @@ class Backend(QObject):
                 rows = parse_list(output)
             except ValidationError as error:
                 self._host["ready"] = False
+                self._host["inventoryError"] = str(error)
+                self._containers, self._apps = [], []
+                self.inventoryChanged.emit()
+                self.appsChanged.emit()
                 self._say(str(error), True)
                 done()
                 return
@@ -409,6 +460,158 @@ class Backend(QObject):
         except (ValidationError, OSError) as error:
             self._say(str(error), True)
             return False
+
+    def _profile_plan(self, name, image, own_home, template, extra, nvidia):
+        packages = [*template_packages(template, image), *extra.split()]
+        return self._commands().create(name, image, own_home, nvidia=nvidia, existing=self._names(), packages=packages, platform=self.nativePlatform)
+
+    @Slot(str, str, bool, str, str, bool, result=str)
+    def profilePreview(self, name, image, own_home, template, extra, nvidia):
+        try:
+            return self._profile_plan(name, image, own_home, template, extra, nvidia).preview()
+        except ValueError as error:
+            return str(error)
+
+    @Slot(str, str, bool, str, str, bool, result=bool)
+    def createProfile(self, name, image, own_home, template, extra, nvidia):
+        try:
+            return self._start(self._profile_plan(name, image, own_home, template, extra, nvidia))
+        except (ValueError, OSError) as error:
+            self._say(str(error), True)
+            return False
+
+    @Slot(str, str, str, result=str)
+    def packagePreview(self, template, image, extra):
+        try:
+            from .core import validate_packages
+            return " ".join(validate_packages([*template_packages(template, image), *extra.split()])) or "—"
+        except ValueError as error:
+            return str(error)
+
+    @Slot(str, result=bool)
+    def reviewManifest(self, text):
+        self._manifest_text = text
+        try:
+            self._manifest_entries = parse_manifest(text)
+            self._manifest_error = ""
+        except ValueError as error:
+            self._manifest_entries = []
+            self._manifest_error = str(error)
+        self.manifestChanged.emit()
+        return bool(self._manifest_entries)
+
+    @Slot(str)
+    def editManifest(self, text):
+        self._manifest_text = text
+        self.clearManifestReview()
+
+    @Slot()
+    def clearManifestReview(self):
+        self._manifest_entries = []
+        self._manifest_error = ""
+        self.manifestChanged.emit()
+
+    def _manifest_plan(self, index):
+        if index < 0 or index >= len(self._manifest_entries):
+            raise ValidationError("Önce ortam tanımını incele ve bir ortam seç.")
+        entry = self._manifest_entries[index]
+        return self._commands().create(entry["name"], entry["image"], False, nvidia=entry["nvidia"], existing=self._names(), packages=entry["packages"], home=entry["home"], pull=entry["pull"], start_now=entry["start_now"])
+
+    @Slot(int, result=str)
+    def manifestPreview(self, index):
+        try:
+            return self._manifest_plan(index).preview()
+        except ValueError as error:
+            return str(error)
+
+    @Slot(int, result=bool)
+    def canImport(self, index):
+        try:
+            self._manifest_plan(index)
+            return True
+        except ValueError:
+            return False
+
+    @Slot(int, result=bool)
+    def importEnvironment(self, index):
+        try:
+            return self._start(self._manifest_plan(index))
+        except (ValueError, OSError) as error:
+            self._say(str(error), True)
+            return False
+
+    @Slot(result=bool)
+    def exportDefinition(self):
+        try:
+            name = self._require_selected()
+            entry = self._definitions.get(self.runtime + ":" + name)
+            known = bool(entry and entry.get("image") == self.selected.get("image"))
+            if not known:
+                entry = {"name": name, "image": self.selected["image"], "home": self.selected.get("home") or str(Path.home())}
+            if not self.reviewManifest(serialize_manifest(entry, incomplete=not known)):
+                return False
+            self._say("Ortam tarifi hazır; kişisel dosyalar ve sonradan kurulan paketler bu dosyada yer almaz.")
+            return True
+        except (ValueError, OSError, KeyError) as error:
+            self._say(str(error), True)
+            return False
+
+    @staticmethod
+    def _local_file(value):
+        url = QUrl(value)
+        if url.isLocalFile():
+            return Path(url.toLocalFile())
+        if not url.scheme() and Path(value).is_absolute():
+            return Path(value)
+        raise ValidationError("Yalnızca yerel, mutlak dosya yolları destekleniyor.")
+
+    @Slot(str, result=bool)
+    def loadManifestFile(self, value):
+        try:
+            path = self._local_file(value)
+            with path.open("rb") as handle:
+                content = handle.read(MAX_MANIFEST_BYTES + 1)
+            if len(content) > MAX_MANIFEST_BYTES:
+                raise ValidationError("Dosya 128 KiB sınırını aşıyor.")
+            return self.reviewManifest(content.decode("utf-8-sig"))
+        except (ValueError, OSError) as error:
+            self.clearManifestReview()
+            self._say(str(error), True)
+            return False
+
+    @Slot(str, str, result=bool)
+    def saveManifestFile(self, value, text):
+        if self.demo:
+            self._say("Demo: dosya yazılmaz; metni kopyalayabilirsin.")
+            return False
+        temp = None
+        try:
+            parse_manifest(text)
+            path = self._local_file(value)
+            if path.is_symlink():
+                raise ValidationError("Bağlantı olan dosyanın üzerine yazılmaz.")
+            fd, temp = tempfile.mkstemp(prefix=".puppeteer-", dir=path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.replace(temp, path)
+            self._say("Ortam tanımı kaydedildi: " + str(path))
+            return True
+        except (ValueError, OSError) as error:
+            self._say(str(error), True)
+            return False
+        finally:
+            if temp and Path(temp).exists():
+                Path(temp).unlink()
+
+    @Slot(str)
+    def copyText(self, text):
+        QGuiApplication.clipboard().setText(text)
+
+    @Slot(result=str)
+    def diagnosticReport(self):
+        rows = ["The Puppeteer 0.2.0", "Host: " + self._host.get("name", "Linux"), "Engine: " + self.runtime, "Platform: " + self.nativePlatform]
+        rows += [f'[{c["status"]}] {c["title"]}: {c["detail"]}' for c in self.diagnostics]
+        return "\n".join(rows)
 
     @Slot(str, bool, result=bool)
     def cloneContainer(self, name, own_home):
@@ -526,6 +729,12 @@ class Backend(QObject):
             raise ValidationError("Önce Kurulum ekranında Distrobox ve motor erişimini hazırla.")
         if not self.demo and self.runtime == "podman" and not install and not self._host.get("rootless"):
             raise ValidationError("Podman rootless çalışma doğrulanamadı. Motor yapılandırmasını kontrol et.")
+        if plan.metadata.get("home"):
+            # Protect custom homes even if first initialization fails after
+            # the container was created. A failed attempt remains recorded.
+            self._homes[plan.runtime + ":" + plan.metadata["name"]] = plan.metadata["home"]
+            if not self.demo:
+                atomic_json(config_home() / "environments.json", self._homes)
         ident = uuid.uuid4().hex
         job = {"id": ident, "title": plan.title, "state": "running", "stage": plan.steps[0].title, "log": plan.preview(), "terminal": plan.interactive, "started": time.time(), "runtime": plan.runtime}
         self._jobs.append(job)
@@ -641,6 +850,20 @@ class Backend(QObject):
                     atomic_json(config_home() / "environments.json", self._homes)
                 except OSError as error:
                     active["job"]["log"] += "\n" + str(error)
+            if "packages" in plan.metadata and "image" in plan.metadata:
+                self._definitions[plan.runtime + ":" + plan.metadata["name"]] = plan.metadata
+                if not self.demo:
+                    try:
+                        atomic_json(config_home() / "definitions.json", self._definitions)
+                    except OSError as error:
+                        active["job"]["log"] += "\n" + str(error)
+        if code == 0 and plan.title.startswith("Silme"):
+            self._definitions.pop(plan.runtime + ":" + plan.resource, None)
+            if not self.demo:
+                try:
+                    atomic_json(config_home() / "definitions.json", self._definitions)
+                except OSError as error:
+                    active["job"]["log"] += "\n" + str(error)
         self._persist_job(active["job"])
         self._active_job = None
         self._active_process = None
@@ -657,7 +880,8 @@ class Backend(QObject):
             return
         if "name" in plan.metadata:
             name = plan.metadata["name"]
-            self._containers.append({"name": name, "id": "demo-" + name, "image": plan.metadata.get("image", self.selected.get("image", "demo")), "distro": "Demo", "status": "Up", "running": True, "home": plan.metadata["home"], "runtime": self.runtime})
+            running = plan.metadata.get("start_now", True)
+            self._containers.append({"name": name, "id": "demo-" + name, "image": plan.metadata.get("image", self.selected.get("image", "demo")), "distro": "Demo", "status": "Up" if running else "Exited", "running": running, "home": plan.metadata["home"], "runtime": self.runtime})
             self._selected = name
         elif plan.title.startswith("Silme"):
             self._containers = [c for c in self._containers if c["name"] != plan.resource]

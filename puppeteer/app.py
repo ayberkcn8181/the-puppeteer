@@ -27,7 +27,8 @@ def main() -> int:
     app = QGuiApplication([sys.argv[0]])
     app.setApplicationName("The Puppeteer")
     app.setOrganizationName("ThePuppeteer")
-    app.setApplicationVersion("0.1.0")
+    from . import __version__
+    app.setApplicationVersion(__version__)
     app.setDesktopFileName("the-puppeteer")
     assets = Path(__file__).parent / "qml"
     app.setWindowIcon(QIcon(str(assets / "logo.svg")))
